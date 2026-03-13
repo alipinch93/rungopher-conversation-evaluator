@@ -577,6 +577,14 @@ def _phase4_report(cluster_data: dict, outcome_samples: dict, job_id: str, model
     clusters = cluster_data.get("clusters", [])
     total = cluster_data.get("total_conversations", 0)
 
+    # ── Resolution Rate ───────────────────────────────────────────────────
+    cluster_by_name = {c["name"]: c["count"] for c in clusters}
+    voicemail_count = cluster_by_name.get("VOICEMAIL", 0)
+    no_answer_count = cluster_by_name.get("NO_ANSWER", 0)
+    connected_calls = total - voicemail_count - no_answer_count
+    resolved_calls = cluster_by_name.get("PAYMENT_ARRANGED", 0) + cluster_by_name.get("TRANSFERRED", 0)
+    resolution_rate = round(resolved_calls / connected_calls * 100, 1) if connected_calls > 0 else 0.0
+
     # ── LLM: executive summary only ──────────────────────────────────────
     log_to_job(job_id, "Generating executive summary...")
     breakdown = [{"name": c["name"], "count": c["count"], "pct": c["percentage"]} for c in clusters]
@@ -584,10 +592,12 @@ def _phase4_report(cluster_data: dict, outcome_samples: dict, job_id: str, model
 
 Data:
 - Total conversations: {total:,}
+- Connected calls (user picked up, excluding voicemail/no-answer): {connected_calls:,}
+- Resolution rate: {resolution_rate}% ({resolved_calls} resolved out of {connected_calls} connected calls)
 - Outcome breakdown: {json.dumps(breakdown)}
 - Compliance flags identified: {len(cluster_data.get('compliance_flags', []))}
 
-Be specific — use real numbers and outcome names. No heading, just 3 sentences."""
+Be specific — use real numbers. Always mention the resolution rate. No heading, just 3 sentences."""
 
     resp = client.chat.completions.create(
         model=model,
@@ -694,6 +704,59 @@ Be specific — use real numbers and outcome names. No heading, just 3 sentences
     )
 
     safe_date = report_date.replace(" ", "_")
+
+    resolution_card = f"""
+    <div style="background:{colors['navy']};color:white;padding:32px 24px;">
+      <div style="max-width:920px;margin:0 auto;display:flex;gap:24px;flex-wrap:wrap;">
+        <div style="flex:1;min-width:200px;background:rgba(255,255,255,0.08);border-radius:12px;
+                    padding:24px;text-align:center;">
+          <div style="font-size:42px;font-weight:600;font-family:'Poppins',sans-serif;
+                      color:{colors['cobalt'] if resolution_rate >= 10 else colors['coral']};">
+            {resolution_rate}%
+          </div>
+          <div style="font-size:15px;font-weight:600;font-family:'Poppins',sans-serif;margin-top:6px;">
+            Resolution Rate
+          </div>
+          <div style="font-size:12px;opacity:0.65;margin-top:4px;">
+            {resolved_calls:,} resolved / {connected_calls:,} connected calls
+          </div>
+          <div style="font-size:11px;opacity:0.5;margin-top:2px;">
+            Transferred + Payment Arranged
+          </div>
+        </div>
+        <div style="flex:1;min-width:200px;background:rgba(255,255,255,0.08);border-radius:12px;
+                    padding:24px;text-align:center;">
+          <div style="font-size:42px;font-weight:600;font-family:'Poppins',sans-serif;">
+            {connected_calls:,}
+          </div>
+          <div style="font-size:15px;font-weight:600;font-family:'Poppins',sans-serif;margin-top:6px;">
+            Connected Calls
+          </div>
+          <div style="font-size:12px;opacity:0.65;margin-top:4px;">
+            of {total:,} total conversations
+          </div>
+          <div style="font-size:11px;opacity:0.5;margin-top:2px;">
+            Excludes voicemail &amp; no-answer
+          </div>
+        </div>
+        <div style="flex:1;min-width:200px;background:rgba(255,255,255,0.08);border-radius:12px;
+                    padding:24px;text-align:center;">
+          <div style="font-size:42px;font-weight:600;font-family:'Poppins',sans-serif;">
+            {voicemail_count + no_answer_count:,}
+          </div>
+          <div style="font-size:15px;font-weight:600;font-family:'Poppins',sans-serif;margin-top:6px;">
+            Unreachable
+          </div>
+          <div style="font-size:12px;opacity:0.65;margin-top:4px;">
+            {round((voicemail_count + no_answer_count) / total * 100, 1) if total else 0}% of total
+          </div>
+          <div style="font-size:11px;opacity:0.5;margin-top:2px;">
+            Voicemail + no-answer
+          </div>
+        </div>
+      </div>
+    </div>"""
+
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -720,11 +783,13 @@ Be specific — use real numbers and outcome names. No heading, just 3 sentences
   <button id="pdf-btn" onclick="downloadPDF()">&#8595; Download PDF</button>
 
   <div id="report-content">
-    <div style="background:{colors['navy']};color:white;padding:56px 24px;text-align:center;">
+    <div style="background:{colors['navy']};color:white;padding:56px 24px 32px;text-align:center;">
       <h1 style="margin:0 0 8px;font-size:34px;">RunGopher</h1>
       <p style="margin:0 0 6px;font-size:18px;opacity:0.85;font-family:'Poppins',sans-serif;">Conversation Evaluation Report</p>
       <p style="margin:0;opacity:0.65;font-size:14px;">{report_date} &nbsp;·&nbsp; {total:,} conversations analysed</p>
     </div>
+
+    {resolution_card}
 
     <div style="max-width:920px;margin:0 auto;padding:52px 24px;">
       {section("Executive Summary", f"<p style='font-size:16px;line-height:1.8;'>{exec_summary}</p>")}
