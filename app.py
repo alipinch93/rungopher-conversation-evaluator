@@ -613,6 +613,25 @@ Be specific — use real numbers. Always mention the resolution rate. No heading
     POSITIVE = {"PAYMENT_ARRANGED", "CALLBACK_SCHEDULED", "TRANSFERRED"}
     NEGATIVE = {"REFUSED", "HUNG_UP", "COMPLIANCE_ISSUE", "DISPUTE"}
 
+    DISPLAY_NAMES = {
+        "PAYMENT_ARRANGED": "Payment Arranged",
+        "CALLBACK_SCHEDULED": "Callback Scheduled",
+        "TRANSFERRED": "Transferred",
+        "VOICEMAIL": "Voicemail",
+        "NO_ANSWER": "No Answer",
+        "HUNG_UP": "Hung Up",
+        "WRONG_NUMBER": "Wrong Number",
+        "REFUSED": "Refused",
+        "DISPUTE": "Dispute",
+        "HARDSHIP_CLAIM": "Hardship Claim",
+        "COMPLIANCE_ISSUE": "Compliance Issue",
+        "CONFUSED": "Confused",
+        "OTHER": "Other",
+    }
+
+    def display_name(name):
+        return DISPLAY_NAMES.get(name, name.replace("_", " ").title())
+
     def outcome_color(name):
         if name in POSITIVE:
             return colors["cobalt"]
@@ -628,7 +647,7 @@ Be specific — use real numbers. Always mention the resolution rate. No heading
         bar_html += f"""
         <div style="margin-bottom:14px;">
           <div style="display:flex;justify-content:space-between;margin-bottom:4px;">
-            <span style="font-family:{typo['heading']};font-weight:600;font-size:14px;">{c['name']}</span>
+            <span style="font-family:{typo['heading']};font-weight:600;font-size:14px;">{display_name(c['name'])}</span>
             <span style="color:{colors['muted']};font-size:13px;">{c['count']:,} &nbsp;({pct}%)</span>
           </div>
           <div style="background:#e5e7eb;border-radius:8px;height:22px;overflow:hidden;">
@@ -651,7 +670,7 @@ Be specific — use real numbers. Always mention the resolution rate. No heading
         <div style="background:{colors['sand']};border-radius:12px;box-shadow:0 2px 8px rgba(0,0,0,0.07);
                     padding:24px;margin-bottom:16px;border-left:5px solid {color};">
           <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
-            <h3 style="margin:0;font-family:{typo['heading']};font-weight:600;">{c['name']}</h3>
+            <h3 style="margin:0;font-family:{typo['heading']};font-weight:600;">{display_name(c['name'])}</h3>
             <span style="background:{color};color:white;padding:3px 12px;border-radius:20px;font-size:13px;white-space:nowrap;">
               {c['count']:,} &nbsp;({c['percentage']}%)
             </span>
@@ -675,7 +694,7 @@ Be specific — use real numbers. Always mention the resolution rate. No heading
             </div>"""
         sample_html += f"""
         <div style="margin-bottom:28px;">
-          <h3 style="font-family:{typo['heading']};font-weight:600;color:{color};margin-bottom:10px;">{outcome}</h3>
+          <h3 style="font-family:{typo['heading']};font-weight:600;color:{color};margin-bottom:10px;">{display_name(outcome)}</h3>
           {cards}
         </div>"""
 
