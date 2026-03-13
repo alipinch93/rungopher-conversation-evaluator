@@ -582,7 +582,9 @@ def _phase4_report(cluster_data: dict, outcome_samples: dict, job_id: str, model
     voicemail_count = cluster_by_name.get("VOICEMAIL", 0)
     no_answer_count = cluster_by_name.get("NO_ANSWER", 0)
     connected_calls = total - voicemail_count - no_answer_count
-    resolved_calls = cluster_by_name.get("PAYMENT_ARRANGED", 0) + cluster_by_name.get("TRANSFERRED", 0)
+    resolved_calls = (cluster_by_name.get("PAYMENT_ARRANGED", 0)
+                      + cluster_by_name.get("TRANSFERRED", 0)
+                      + cluster_by_name.get("HARDSHIP_CLAIM", 0))
     resolution_rate = round(resolved_calls / connected_calls * 100, 1) if connected_calls > 0 else 0.0
 
     # ── LLM: executive summary only ──────────────────────────────────────
@@ -639,9 +641,40 @@ Be specific — use real numbers. Always mention the resolution rate. No heading
             return colors["coral"]
         return colors["muted"]
 
+    # ── Group PAYMENT_ARRANGED + HARDSHIP_CLAIM for display ──────────────
+    GROUPED = {"PAYMENT_ARRANGED", "HARDSHIP_CLAIM"}
+    grouped_cluster = None
+    display_clusters = []
+    for c in clusters:
+        if c["name"] in GROUPED:
+            if grouped_cluster is None:
+                grouped_cluster = {
+                    "name": "_RESOLVED_PAYMENT",
+                    "count": 0,
+                    "percentage": 0.0,
+                    "common_patterns": [],
+                    "outliers": [],
+                }
+            grouped_cluster["count"] += c["count"]
+            grouped_cluster["percentage"] = round(
+                grouped_cluster["percentage"] + c["percentage"], 1
+            )
+            grouped_cluster["common_patterns"].extend(c.get("common_patterns", []))
+            grouped_cluster["outliers"].extend(c.get("outliers", []))
+        else:
+            display_clusters.append(c)
+    if grouped_cluster:
+        # Insert at position of first PAYMENT_ARRANGED or HARDSHIP_CLAIM
+        first_idx = next(
+            (i for i, c in enumerate(clusters) if c["name"] in GROUPED), len(display_clusters)
+        )
+        display_clusters.insert(min(first_idx, len(display_clusters)), grouped_cluster)
+
+    DISPLAY_NAMES["_RESOLVED_PAYMENT"] = "Payment Arranged / Hardship"
+
     # ── Outcome bar chart ─────────────────────────────────────────────────
     bar_html = ""
-    for c in clusters:
+    for c in display_clusters:
         color = outcome_color(c["name"])
         pct = c["percentage"]
         bar_html += f"""
@@ -657,7 +690,7 @@ Be specific — use real numbers. Always mention the resolution rate. No heading
 
     # ── Cluster detail cards ──────────────────────────────────────────────
     cluster_cards = ""
-    for c in clusters:
+    for c in display_clusters:
         color = outcome_color(c["name"])
         patterns = "".join(f"<li style='margin-bottom:4px;'>{p}</li>" for p in c.get("common_patterns", []))
         outliers = c.get("outliers", [])
