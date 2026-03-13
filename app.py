@@ -230,17 +230,19 @@ async def _run_pipeline_async(
                 cols.append(c)
         summary_df[cols].to_csv(summary_only_path, index=False)
 
-        # Store per-conversation summaries for chat queries and report sampling
+        # Store per-conversation data (summary + truncated transcript) for chat queries
         job["summaries"] = [
             {
                 "id": str(row.get("Participant ID", f"row_{i}")),
                 "outcome": str(row.get("Outcome", "")),
                 "summary": str(row.get("Summary", "")).split("|", 1)[-1].strip()
                     if "|" in str(row.get("Summary", "")) else str(row.get("Summary", "")),
+                "transcript": str(row.get("Transcript", ""))[:1200],
             }
             for i, (_, row) in enumerate(summary_df.iterrows())
             if str(row.get("Outcome", "")) not in ("ERROR", "NO_TRANSCRIPT")
         ]
+        job["summaries_path"] = str(summary_path)
 
         # Build 3-example samples per outcome for the report
         outcome_samples: dict = {}
@@ -563,7 +565,7 @@ Summaries:
 
 
 def _phase4_report(cluster_data: dict, outcome_samples: dict, job_id: str, model: str) -> str:
-    """Phase 4: Generate branded HTML report via OpenAI."""
+    """Phase 4: Build HTML report programmatically; use LLM only for executive summary."""
     from openai import OpenAI
     from scripts.utils.brand import BRAND
 
@@ -572,56 +574,161 @@ def _phase4_report(cluster_data: dict, outcome_samples: dict, job_id: str, model
     typo = BRAND["typography"]
     report_date = datetime.now().strftime("%B %d, %Y")
 
-    prompt = f"""Generate a complete, standalone HTML report for a debt collection conversation evaluation.
+    clusters = cluster_data.get("clusters", [])
+    total = cluster_data.get("total_conversations", 0)
 
-BRAND GUIDELINES (MANDATORY):
-- Background: {colors['white']}
-- Card backgrounds: {colors['sand']}
-- Primary accent (alerts, negative outcomes): {colors['coral']}
-- Secondary accent (charts, positive outcomes): {colors['cobalt']}
-- Dark sections (hero): {colors['navy']}
-- Body text: {colors['black']}
-- Headings: {typo['heading']}; font-weight: {typo['heading_weight']}
-- Body: {typo['body']}; font-weight: {typo['body_weight']}
-- Import Google Fonts Poppins and Recursive
-- 50% whitespace, border-radius:12px, subtle shadows
+    # ── LLM: executive summary only ──────────────────────────────────────
+    log_to_job(job_id, "Generating executive summary...")
+    breakdown = [{"name": c["name"], "count": c["count"], "pct": c["percentage"]} for c in clusters]
+    summary_prompt = f"""Write a 3-sentence executive summary for a debt collection voice agent evaluation.
 
-REPORT DATE: {report_date} — use this exact date everywhere. Do NOT invent or guess a date.
+Data:
+- Total conversations: {total:,}
+- Outcome breakdown: {json.dumps(breakdown)}
+- Compliance flags identified: {len(cluster_data.get('compliance_flags', []))}
 
-REPORT STRUCTURE:
-1. Navy hero banner — "RunGopher" + "Conversation Evaluation Report" + "{report_date}"
-2. Executive summary (3-4 sentences covering total volume, top outcomes, key patterns)
-3. Outcome Distribution — horizontal CSS bar chart using real counts/percentages from the data (cobalt=positive outcomes like PAYMENT_ARRANGED/CALLBACK_SCHEDULED, coral=negative like REFUSED/HUNG_UP/COMPLIANCE_ISSUE, sand=neutral)
-4. Cluster detail cards — one card per cluster with name, count, percentage, common patterns, and outliers
-5. Sample Conversations — for each outcome category that has samples, show 2-3 real conversation cards on sand background displaying the Participant ID and the one-sentence summary
-6. Top tactics numbered list with concrete detail
-7. Compliance flags in coral-bordered alert cards with specific details
-8. Recommendations in cobalt-accented cards with actionable steps
-9. Footer: "Powered by RunGopher"
-
-Be thorough — each section should be fully populated with the real data. Do not leave sections empty or generic.
-Output ONLY valid HTML. All CSS inline in <style>. No JavaScript. Self-contained.
-
-DATA:
-{json.dumps(cluster_data, indent=2)}
-
-SAMPLE CONVERSATIONS (2-3 real examples per outcome — include these in section 5):
-{json.dumps(outcome_samples, indent=2)}"""
-
-    log_to_job(job_id, "Applying RunGopher brand system...")
+Be specific — use real numbers and outcome names. No heading, just 3 sentences."""
 
     resp = client.chat.completions.create(
         model=model,
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0.4,
-        max_tokens=16000,
+        messages=[{"role": "user", "content": summary_prompt}],
+        temperature=0.3,
+        max_tokens=300,
+    )
+    exec_summary = resp.choices[0].message.content.strip()
+
+    log_to_job(job_id, "Building report HTML...")
+
+    # ── Helpers ───────────────────────────────────────────────────────────
+    POSITIVE = {"PAYMENT_ARRANGED", "CALLBACK_SCHEDULED", "TRANSFERRED"}
+    NEGATIVE = {"REFUSED", "HUNG_UP", "COMPLIANCE_ISSUE", "DISPUTE"}
+
+    def outcome_color(name):
+        if name in POSITIVE:
+            return colors["cobalt"]
+        if name in NEGATIVE:
+            return colors["coral"]
+        return colors["muted"]
+
+    # ── Outcome bar chart ─────────────────────────────────────────────────
+    bar_html = ""
+    for c in clusters:
+        color = outcome_color(c["name"])
+        pct = c["percentage"]
+        bar_html += f"""
+        <div style="margin-bottom:14px;">
+          <div style="display:flex;justify-content:space-between;margin-bottom:4px;">
+            <span style="font-family:{typo['heading']};font-weight:600;font-size:14px;">{c['name']}</span>
+            <span style="color:{colors['muted']};font-size:13px;">{c['count']:,} &nbsp;({pct}%)</span>
+          </div>
+          <div style="background:#e5e7eb;border-radius:8px;height:22px;overflow:hidden;">
+            <div style="background:{color};width:{max(pct, 0.5)}%;height:100%;border-radius:8px;"></div>
+          </div>
+        </div>"""
+
+    # ── Cluster detail cards ──────────────────────────────────────────────
+    cluster_cards = ""
+    for c in clusters:
+        color = outcome_color(c["name"])
+        patterns = "".join(f"<li style='margin-bottom:4px;'>{p}</li>" for p in c.get("common_patterns", []))
+        outliers = c.get("outliers", [])
+        outlier_html = (
+            f"<p style='margin:12px 0 0;color:{colors['muted']};font-size:13px;'>"
+            f"<strong>Outliers:</strong> {'; '.join(outliers)}</p>"
+            if outliers else ""
+        )
+        cluster_cards += f"""
+        <div style="background:{colors['sand']};border-radius:12px;box-shadow:0 2px 8px rgba(0,0,0,0.07);
+                    padding:24px;margin-bottom:16px;border-left:5px solid {color};">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+            <h3 style="margin:0;font-family:{typo['heading']};font-weight:600;">{c['name']}</h3>
+            <span style="background:{color};color:white;padding:3px 12px;border-radius:20px;font-size:13px;white-space:nowrap;">
+              {c['count']:,} &nbsp;({c['percentage']}%)
+            </span>
+          </div>
+          <ul style="margin:0;padding-left:20px;">{patterns}</ul>
+          {outlier_html}
+        </div>"""
+
+    # ── Sample conversations ───────────────────────────────────────────────
+    sample_html = ""
+    for outcome, samples in outcome_samples.items():
+        if not samples:
+            continue
+        color = outcome_color(outcome)
+        cards = ""
+        for s in samples:
+            cards += f"""
+            <div style="background:white;border-radius:8px;padding:14px;margin-bottom:8px;border-left:3px solid {color};">
+              <div style="font-size:11px;color:{colors['muted']};margin-bottom:5px;">ID: {s['id']}</div>
+              <p style="margin:0;font-size:14px;">{s['summary']}</p>
+            </div>"""
+        sample_html += f"""
+        <div style="margin-bottom:28px;">
+          <h3 style="font-family:{typo['heading']};font-weight:600;color:{color};margin-bottom:10px;">{outcome}</h3>
+          {cards}
+        </div>"""
+
+    # ── Tactics, flags, recommendations ──────────────────────────────────
+    tactics_html = "".join(
+        f"<li style='margin-bottom:8px;'>{t}</li>"
+        for t in cluster_data.get("top_tactics", [])
+    )
+    flags_html = "".join(
+        f"<div style='border:2px solid {colors['coral']};border-radius:12px;padding:16px;"
+        f"margin-bottom:10px;background:rgba(255,28,77,0.04);'>{f}</div>"
+        for f in cluster_data.get("compliance_flags", [])
+    )
+    recs_html = "".join(
+        f"<div style='border:2px solid {colors['cobalt']};border-radius:12px;padding:16px;"
+        f"margin-bottom:10px;background:rgba(50,89,254,0.04);'>{r}</div>"
+        for r in cluster_data.get("recommendations", [])
     )
 
-    html = resp.choices[0].message.content.strip()
-    if html.startswith("```"):
-        lines = html.split("\n")
-        html = "\n".join(lines[1:-1]) if lines[-1].strip() == "```" else "\n".join(lines[1:])
-    return html
+    # ── Assemble HTML ─────────────────────────────────────────────────────
+    section = lambda title, body: (
+        f"<div style='margin-bottom:52px;'>"
+        f"<h2 style='font-family:{typo['heading']};font-weight:600;margin-bottom:20px;"
+        f"padding-bottom:10px;border-bottom:2px solid {colors['sand']};'>{title}</h2>"
+        f"{body}</div>"
+    )
+
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>RunGopher Conversation Evaluation Report</title>
+  <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;600&family=Recursive:wght@400&display=swap" rel="stylesheet">
+  <style>
+    body {{ font-family:'Recursive',Arial,sans-serif; margin:0; padding:0;
+           background:{colors['white']}; color:{colors['black']}; line-height:1.6; }}
+    h1,h2,h3 {{ font-family:'Poppins',Arial,sans-serif; font-weight:600; }}
+  </style>
+</head>
+<body>
+  <div style="background:{colors['navy']};color:white;padding:56px 24px;text-align:center;">
+    <h1 style="margin:0 0 8px;font-size:34px;">RunGopher</h1>
+    <p style="margin:0 0 6px;font-size:18px;opacity:0.85;font-family:'Poppins',sans-serif;">Conversation Evaluation Report</p>
+    <p style="margin:0;opacity:0.65;font-size:14px;">{report_date} &nbsp;·&nbsp; {total:,} conversations analysed</p>
+  </div>
+
+  <div style="max-width:920px;margin:0 auto;padding:52px 24px;">
+    {section("Executive Summary", f"<p style='font-size:16px;line-height:1.8;'>{exec_summary}</p>")}
+    {section("Outcome Distribution", bar_html)}
+    {section("Cluster Detail", cluster_cards)}
+    {section("Sample Conversations", sample_html or f"<p style='color:{colors['muted']};font-style:italic;'>No samples available.</p>")}
+    {section("Top Tactics", f"<ol style='padding-left:24px;'>{tactics_html}</ol>")}
+    {section("Compliance Flags", flags_html)}
+    {section("Recommendations", recs_html)}
+  </div>
+
+  <footer style="text-align:center;padding:28px;background:{colors['sand']};
+                 color:{colors['muted']};font-size:13px;">
+    Powered by RunGopher
+  </footer>
+</body>
+</html>"""
 
 
 # ─── Chat Endpoint ──────────────────────────────────────────────────────
@@ -648,13 +755,33 @@ async def chat(job_id: str, body: dict, _=Depends(require_auth)):
     cluster_data = results.get("cluster_data", {})
     summaries = job.get("summaries", [])
 
-    summaries_text = "\n".join(
+    # Build a compact index: ID, outcome, one-line summary (no transcripts yet)
+    index_text = "\n".join(
         f"{s['id']}: [{s['outcome']}] {s['summary']}"
         for s in summaries
     ) if summaries else "(no individual conversation data available)"
 
+    # Include up to 3 full transcripts per outcome category so the model
+    # can actually show conversations when asked
+    outcome_transcript_samples: dict = {}
+    for s in summaries:
+        outcome = s["outcome"]
+        transcript = s.get("transcript", "").strip()
+        if transcript and outcome not in outcome_transcript_samples:
+            outcome_transcript_samples[outcome] = []
+        if transcript and len(outcome_transcript_samples.get(outcome, [])) < 3:
+            outcome_transcript_samples.setdefault(outcome, []).append(
+                {"id": s["id"], "transcript": transcript}
+            )
+
+    transcript_samples_text = ""
+    for outcome, samples in outcome_transcript_samples.items():
+        transcript_samples_text += f"\n\n--- {outcome} ---"
+        for sample in samples:
+            transcript_samples_text += f"\n[ID: {sample['id']}]\n{sample['transcript']}\n"
+
     system_prompt = f"""You are an analyst assistant helping review a RunGopher debt collection voice agent evaluation report.
-Answer questions clearly and concisely based only on the data provided below.
+Answer questions based only on the data provided below.
 
 EVALUATION SUMMARY:
 - Total conversations analyzed: {results.get('total_conversations', 0)}
@@ -673,11 +800,14 @@ COMPLIANCE FLAGS:
 RECOMMENDATIONS:
 {json.dumps(cluster_data.get('recommendations', []), indent=2)}
 
-INDIVIDUAL CONVERSATIONS ({len(summaries)} total):
-Each line: ParticipantID: [OUTCOME] one-sentence summary
-{summaries_text}
+CONVERSATION INDEX ({len(summaries)} total — ID: [OUTCOME] summary):
+{index_text}
 
-When asked for examples or specific conversations, quote 3-5 relevant entries by Participant ID and summary.
+SAMPLE FULL TRANSCRIPTS (PII-stripped, up to 3 per outcome category):
+{transcript_samples_text if transcript_samples_text else "(none available)"}
+
+When asked to show a conversation or give an example, quote the actual transcript from the samples above.
+When asked about a specific outcome type, show the matching transcript sample(s) with their Participant IDs.
 Be direct and specific. Use numbers and percentages from the data where relevant."""
 
     client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
