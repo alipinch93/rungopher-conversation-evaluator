@@ -215,11 +215,10 @@ async def _run_pipeline_async(
         # ─── Phase 2: Summarization ────────────────
         job["phase"] = 2
         job["phase_name"] = "Summarization"
-        log_to_job(job_id, f"Phase 2: Summarization ({model})", "info")
+        concurrency = int(os.getenv("CONCURRENCY", "10"))
+        log_to_job(job_id, f"Phase 2: Summarization ({model}, {concurrency} concurrent)", "info")
 
-        summary_df = await asyncio.to_thread(
-            _phase2_summarize, stripped_df, job_id, model
-        )
+        summary_df = await _phase2_summarize_async(stripped_df, job_id, model, concurrency)
 
         summary_path = SUMMARIES_DIR / f"{Path(filename).stem}_summaries.csv"
         summary_df.to_csv(summary_path, index=False)
@@ -354,13 +353,17 @@ def _phase1_strip_pii(csv_path: str, job_id: str, threshold: float) -> tuple:
     return df, total_stats
 
 
-def _phase2_summarize(df: pd.DataFrame, job_id: str, model: str) -> pd.DataFrame:
-    """Phase 2: Generate 1-sentence summaries via OpenAI."""
-    from openai import OpenAI
-
-    client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-
+async def _phase2_summarize_async(
+    df: pd.DataFrame, job_id: str, model: str, concurrency: int
+) -> pd.DataFrame:
+    """Phase 2: Concurrent summarization with exponential backoff on rate limits."""
+    from openai import AsyncOpenAI
     from scripts.utils.brand import OUTCOME_CATEGORIES
+
+    client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+    semaphore = asyncio.Semaphore(concurrency)
+    total = len(df)
+    completed = 0
 
     prompt_template = """You are analyzing a debt collection voice agent conversation.
 PII has been redacted. Speakers: "AI" (agent) and "User" (debtor).
@@ -375,51 +378,55 @@ Format: OUTCOME_CATEGORY | One sentence description
 Transcript:
 {transcript}"""
 
-    outcomes = []
-    summaries = []
-
-    for idx, row in df.iterrows():
-        transcript = row.get("Transcript", "")
-
+    async def summarize_one(transcript: str) -> tuple:
+        nonlocal completed
         if not transcript.strip():
-            outcomes.append("NO_TRANSCRIPT")
-            summaries.append("NO_TRANSCRIPT | Empty transcript")
-            continue
+            completed += 1
+            return "NO_TRANSCRIPT", "NO_TRANSCRIPT | Empty transcript"
 
-        try:
-            resp = client.chat.completions.create(
-                model=model,
-                messages=[{"role": "user", "content": prompt_template.format(
-                    outcomes=", ".join(OUTCOME_CATEGORIES),
-                    transcript=transcript[:8000],
-                )}],
-                temperature=0.3,
-                max_tokens=200,
-            )
-            result = resp.choices[0].message.content.strip()
+        async with semaphore:
+            for attempt in range(6):
+                try:
+                    resp = await client.chat.completions.create(
+                        model=model,
+                        messages=[{"role": "user", "content": prompt_template.format(
+                            outcomes=", ".join(OUTCOME_CATEGORIES),
+                            transcript=transcript[:8000],
+                        )}],
+                        temperature=0.3,
+                        max_tokens=200,
+                    )
+                    result = resp.choices[0].message.content.strip()
+                    if "|" in result:
+                        parts = result.split("|", 1)
+                        outcome = parts[0].strip().upper().replace(" ", "_")
+                        summary = parts[1].strip()
+                    else:
+                        outcome = "OTHER"
+                        summary = result
+                    completed += 1
+                    if completed % 50 == 0:
+                        log_to_job(job_id, f"Summarized {completed}/{total}...")
+                    return outcome, f"{outcome} | {summary}"
 
-            if "|" in result:
-                parts = result.split("|", 1)
-                outcome = parts[0].strip().upper().replace(" ", "_")
-                summary = parts[1].strip()
-            else:
-                outcome = "OTHER"
-                summary = result
+                except Exception as e:
+                    err = str(e)
+                    if "rate_limit" in err.lower() or "429" in err or "rate limit" in err.lower():
+                        wait = min(2 ** attempt + 1, 60)
+                        log_to_job(job_id, f"Rate limit hit — retrying in {wait}s (attempt {attempt + 1}/6)...", "warn")
+                        await asyncio.sleep(wait)
+                    else:
+                        completed += 1
+                        return "ERROR", f"ERROR | {err}"
 
-            outcomes.append(outcome)
-            summaries.append(f"{outcome} | {summary}")
+            completed += 1
+            return "ERROR", "ERROR | Max retries exceeded"
 
-        except Exception as e:
-            outcomes.append("ERROR")
-            summaries.append(f"ERROR | {str(e)}")
+    transcripts = [str(row.get("Transcript", "")) for _, row in df.iterrows()]
+    results = await asyncio.gather(*[summarize_one(t) for t in transcripts])
 
-        if (idx + 1) % 25 == 0:
-            log_to_job(job_id, f"Summarized {idx + 1}/{len(df)}...")
-
-        time.sleep(0.3)  # Rate limit
-
-    df["Outcome"] = outcomes
-    df["Summary"] = summaries
+    df["Outcome"] = [r[0] for r in results]
+    df["Summary"] = [r[1] for r in results]
     return df
 
 
@@ -467,21 +474,30 @@ Summaries:
 
     for i, batch in enumerate(batches):
         log_to_job(job_id, f"Clustering batch {i + 1}/{len(batches)} ({len(batch)} summaries)...")
-        try:
-            summaries_text = "\n".join(f"{j+1}. {s}" for j, s in enumerate(batch))
-            resp = client.chat.completions.create(
-                model=model,
-                messages=[{"role": "user", "content": cluster_prompt.format(
-                    count=len(batch), summaries=summaries_text
-                )}],
-                temperature=0.2,
-                max_tokens=4000,
-                response_format={"type": "json_object"},
-            )
-            result = json.loads(resp.choices[0].message.content.strip())
-            batch_results.append(result)
-        except Exception as e:
-            log_to_job(job_id, f"⚠ Batch {i + 1} error: {str(e)}", "warn")
+        summaries_text = "\n".join(f"{j+1}. {s}" for j, s in enumerate(batch))
+        for attempt in range(5):
+            try:
+                resp = client.chat.completions.create(
+                    model=model,
+                    messages=[{"role": "user", "content": cluster_prompt.format(
+                        count=len(batch), summaries=summaries_text
+                    )}],
+                    temperature=0.2,
+                    max_tokens=4000,
+                    response_format={"type": "json_object"},
+                )
+                result = json.loads(resp.choices[0].message.content.strip())
+                batch_results.append(result)
+                break
+            except Exception as e:
+                err = str(e)
+                if ("rate_limit" in err.lower() or "429" in err or "rate limit" in err.lower()) and attempt < 4:
+                    wait = min(2 ** attempt + 1, 60)
+                    log_to_job(job_id, f"Rate limit — retrying batch {i+1} in {wait}s...", "warn")
+                    time.sleep(wait)
+                else:
+                    log_to_job(job_id, f"⚠ Batch {i + 1} error: {err}", "warn")
+                    break
 
     # Merge
     if not batch_results:
