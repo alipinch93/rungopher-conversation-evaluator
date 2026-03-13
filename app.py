@@ -693,6 +693,7 @@ Be specific — use real numbers and outcome names. No heading, just 3 sentences
         f"{body}</div>"
     )
 
+    safe_date = report_date.replace(" ", "_")
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -700,33 +701,65 @@ Be specific — use real numbers and outcome names. No heading, just 3 sentences
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>RunGopher Conversation Evaluation Report</title>
   <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;600&family=Recursive:wght@400&display=swap" rel="stylesheet">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
   <style>
     body {{ font-family:'Recursive',Arial,sans-serif; margin:0; padding:0;
            background:{colors['white']}; color:{colors['black']}; line-height:1.6; }}
     h1,h2,h3 {{ font-family:'Poppins',Arial,sans-serif; font-weight:600; }}
+    #pdf-btn {{
+      position:fixed; bottom:28px; right:28px; z-index:999;
+      background:{colors['cobalt']}; color:white; border:none; border-radius:10px;
+      padding:12px 22px; font-size:15px; font-family:'Poppins',sans-serif;
+      font-weight:600; cursor:pointer; box-shadow:0 4px 16px rgba(50,89,254,0.35);
+    }}
+    #pdf-btn:hover {{ opacity:0.9; }}
+    @media print {{ #pdf-btn {{ display:none; }} }}
   </style>
 </head>
 <body>
-  <div style="background:{colors['navy']};color:white;padding:56px 24px;text-align:center;">
-    <h1 style="margin:0 0 8px;font-size:34px;">RunGopher</h1>
-    <p style="margin:0 0 6px;font-size:18px;opacity:0.85;font-family:'Poppins',sans-serif;">Conversation Evaluation Report</p>
-    <p style="margin:0;opacity:0.65;font-size:14px;">{report_date} &nbsp;·&nbsp; {total:,} conversations analysed</p>
+  <button id="pdf-btn" onclick="downloadPDF()">&#8595; Download PDF</button>
+
+  <div id="report-content">
+    <div style="background:{colors['navy']};color:white;padding:56px 24px;text-align:center;">
+      <h1 style="margin:0 0 8px;font-size:34px;">RunGopher</h1>
+      <p style="margin:0 0 6px;font-size:18px;opacity:0.85;font-family:'Poppins',sans-serif;">Conversation Evaluation Report</p>
+      <p style="margin:0;opacity:0.65;font-size:14px;">{report_date} &nbsp;·&nbsp; {total:,} conversations analysed</p>
+    </div>
+
+    <div style="max-width:920px;margin:0 auto;padding:52px 24px;">
+      {section("Executive Summary", f"<p style='font-size:16px;line-height:1.8;'>{exec_summary}</p>")}
+      {section("Outcome Distribution", bar_html)}
+      {section("Cluster Detail", cluster_cards)}
+      {section("Sample Conversations", sample_html or f"<p style='color:{colors['muted']};font-style:italic;'>No samples available.</p>")}
+      {section("Top Tactics", f"<ol style='padding-left:24px;'>{tactics_html}</ol>")}
+      {section("Compliance Flags", flags_html)}
+      {section("Recommendations", recs_html)}
+    </div>
+
+    <footer style="text-align:center;padding:28px;background:{colors['sand']};
+                   color:{colors['muted']};font-size:13px;">
+      Powered by RunGopher
+    </footer>
   </div>
 
-  <div style="max-width:920px;margin:0 auto;padding:52px 24px;">
-    {section("Executive Summary", f"<p style='font-size:16px;line-height:1.8;'>{exec_summary}</p>")}
-    {section("Outcome Distribution", bar_html)}
-    {section("Cluster Detail", cluster_cards)}
-    {section("Sample Conversations", sample_html or f"<p style='color:{colors['muted']};font-style:italic;'>No samples available.</p>")}
-    {section("Top Tactics", f"<ol style='padding-left:24px;'>{tactics_html}</ol>")}
-    {section("Compliance Flags", flags_html)}
-    {section("Recommendations", recs_html)}
-  </div>
-
-  <footer style="text-align:center;padding:28px;background:{colors['sand']};
-                 color:{colors['muted']};font-size:13px;">
-    Powered by RunGopher
-  </footer>
+  <script>
+    function downloadPDF() {{
+      const btn = document.getElementById('pdf-btn');
+      btn.textContent = 'Generating...';
+      btn.disabled = true;
+      const element = document.getElementById('report-content');
+      html2pdf().set({{
+        margin: 0,
+        filename: 'RunGopher_Evaluation_{safe_date}.pdf',
+        image: {{ type: 'jpeg', quality: 0.98 }},
+        html2canvas: {{ scale: 2, useCORS: true }},
+        jsPDF: {{ unit: 'mm', format: 'a4', orientation: 'portrait' }}
+      }}).from(element).save().then(() => {{
+        btn.textContent = '↓ Download PDF';
+        btn.disabled = false;
+      }});
+    }}
+  </script>
 </body>
 </html>"""
 
