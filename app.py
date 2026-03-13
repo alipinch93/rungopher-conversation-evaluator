@@ -278,7 +278,7 @@ async def _run_pipeline_async(
         log_to_job(job_id, "Phase 4: Generating branded HTML report", "info")
 
         report_html = await asyncio.to_thread(
-            _phase4_report, cluster_data, outcome_samples, job_id, model
+            _phase4_report, cluster_data, outcome_samples, job_id, model, job_id
         )
 
         timestamp = datetime.now().strftime("%Y-%m-%d_%H%M")
@@ -564,7 +564,7 @@ Summaries:
     return merged
 
 
-def _phase4_report(cluster_data: dict, outcome_samples: dict, job_id: str, model: str) -> str:
+def _phase4_report(cluster_data: dict, outcome_samples: dict, job_id: str, model: str, report_job_id: str = "") -> str:
     """Phase 4: Build HTML report programmatically; use LLM only for executive summary."""
     from openai import OpenAI
     from scripts.utils.brand import BRAND
@@ -816,7 +816,6 @@ Be specific — use real numbers. Always mention the resolution rate. No heading
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>RunGopher Conversation Evaluation Report</title>
   <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;600&family=Recursive:wght@400&display=swap" rel="stylesheet">
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
   <style>
     body {{ font-family:'Recursive',Arial,sans-serif; margin:0; padding:0;
            background:{colors['white']}; color:{colors['black']}; line-height:1.6; }}
@@ -825,14 +824,15 @@ Be specific — use real numbers. Always mention the resolution rate. No heading
       position:fixed; bottom:28px; right:28px; z-index:999;
       background:{colors['cobalt']}; color:white; border:none; border-radius:10px;
       padding:12px 22px; font-size:15px; font-family:'Poppins',sans-serif;
-      font-weight:600; cursor:pointer; box-shadow:0 4px 16px rgba(50,89,254,0.35);
+      font-weight:600; cursor:pointer; text-decoration:none;
+      box-shadow:0 4px 16px rgba(50,89,254,0.35); display:inline-block;
     }}
     #pdf-btn:hover {{ opacity:0.9; }}
     @media print {{ #pdf-btn {{ display:none; }} }}
   </style>
 </head>
 <body>
-  <button id="pdf-btn" onclick="downloadPDF()">&#8595; Download PDF</button>
+  <a id="pdf-btn" href="/api/jobs/{report_job_id}/report/pdf">&#8595; Download PDF</a>
 
   <div id="report-content">
     <div style="background:{colors['navy']};color:white;padding:56px 24px 32px;text-align:center;">
@@ -859,24 +859,6 @@ Be specific — use real numbers. Always mention the resolution rate. No heading
     </footer>
   </div>
 
-  <script>
-    function downloadPDF() {{
-      const btn = document.getElementById('pdf-btn');
-      btn.textContent = 'Generating...';
-      btn.disabled = true;
-      const element = document.getElementById('report-content');
-      html2pdf().set({{
-        margin: 0,
-        filename: 'RunGopher_Evaluation_{safe_date}.pdf',
-        image: {{ type: 'jpeg', quality: 0.98 }},
-        html2canvas: {{ scale: 2, useCORS: true }},
-        jsPDF: {{ unit: 'mm', format: 'a4', orientation: 'portrait' }}
-      }}).from(element).save().then(() => {{
-        btn.textContent = '↓ Download PDF';
-        btn.disabled = false;
-      }});
-    }}
-  </script>
 </body>
 </html>"""
 
@@ -1008,6 +990,53 @@ async def download_report(job_id: str, _=Depends(require_auth)):
         raise HTTPException(404, "Report file not found")
 
     return FileResponse(report_path, media_type="text/html", filename=report_path.name)
+
+
+@app.get("/api/jobs/{job_id}/report/pdf")
+async def download_report_pdf(job_id: str, _=Depends(require_auth)):
+    """Render the HTML report to PDF using Chrome headless and stream it back."""
+    import subprocess, tempfile
+
+    if job_id not in jobs:
+        raise HTTPException(404, "Job not found")
+
+    job = jobs[job_id]
+    if job["status"] != "completed" or not job.get("results", {}).get("report_file"):
+        raise HTTPException(400, "Report not ready yet")
+
+    report_path = REPORTS_DIR / job["results"]["report_file"]
+    if not report_path.exists():
+        raise HTTPException(404, "Report file not found")
+
+    chrome = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+    if not Path(chrome).exists():
+        raise HTTPException(500, "Chrome not found — cannot generate PDF")
+
+    pdf_name = report_path.stem + ".pdf"
+    with tempfile.TemporaryDirectory() as tmpdir:
+        pdf_path = Path(tmpdir) / pdf_name
+        result = subprocess.run(
+            [
+                chrome,
+                "--headless", "--disable-gpu", "--no-sandbox",
+                "--print-to-pdf=" + str(pdf_path),
+                "--no-pdf-header-footer",
+                "--print-to-pdf-no-header",
+                "file://" + str(report_path.resolve()),
+            ],
+            capture_output=True, timeout=60,
+        )
+        if not pdf_path.exists():
+            raise HTTPException(500, f"PDF generation failed: {result.stderr.decode()[:200]}")
+
+        pdf_bytes = pdf_path.read_bytes()
+
+    from fastapi.responses import Response
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{pdf_name}"'},
+    )
 
 
 @app.get("/api/health")
