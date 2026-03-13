@@ -12,7 +12,7 @@ def load_conversations(csv_path: str) -> pd.DataFrame:
     Load a RunGopher conversation CSV export.
     
     Expected columns:
-        Call ID, Assistant, Assistant Phone, Customer Phone, Direction,
+        Participant ID, Assistant, Assistant Phone, Customer Phone, Direction,
         User Intent, Platform Status, Tool Status, Duration (Seconds),
         Connect Time, Transcript
     
@@ -24,12 +24,12 @@ def load_conversations(csv_path: str) -> pd.DataFrame:
 
     df = pd.read_csv(
         csv_path,
-        dtype={"Call ID": str, "Duration (Seconds)": float},
+        dtype={"Participant ID": str, "Duration (Seconds)": float},
         keep_default_na=False,
     )
 
     # Validate expected columns exist
-    expected = {"Call ID", "Transcript"}
+    expected = {"Participant ID", "Transcript"}
     missing = expected - set(df.columns)
     if missing:
         raise ValueError(

@@ -129,7 +129,7 @@ def main():
     print("=" * 60)
 
     # Load stripped conversations
-    df = pd.read_csv(args.input, dtype={"Call ID": str}, keep_default_na=False)
+    df = pd.read_csv(args.input, dtype={"Participant ID": str}, keep_default_na=False)
     print(f"Loaded {len(df)} PII-stripped conversations")
 
     # Initialize OpenAI client
@@ -173,7 +173,7 @@ def main():
     df.to_csv(output_csv, index=False)
 
     # Also save a lightweight summaries-only file for clustering
-    summary_df = df[["Call ID", "Outcome", "Summary", "Duration (Seconds)", "User Intent", "Direction"]].copy()
+    summary_df = df[["Participant ID", "Outcome", "Summary", "Duration (Seconds)", "User Intent", "Direction"]].copy()
     summary_only_path = output_dir / f"{input_name}_summaries_only.csv"
     summary_df.to_csv(summary_only_path, index=False)
 

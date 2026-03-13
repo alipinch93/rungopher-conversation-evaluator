@@ -27,7 +27,7 @@ BRAND = {
 
 # CSV column mapping — matches RunGopher export format
 CSV_COLUMNS = {
-    "call_id": "Call ID",
+    "call_id": "Participant ID",
     "assistant": "Assistant",
     "assistant_phone": "Assistant Phone",
     "customer_phone": "Customer Phone",

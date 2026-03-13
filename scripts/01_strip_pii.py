@@ -187,7 +187,7 @@ def main():
                 print(f"  Processed {idx + 1}/{len(df)} conversations...")
 
         except Exception as e:
-            print(f"  ⚠ Error on row {idx} (Call ID: {row.get('Call ID', '?')}): {e}")
+            print(f"  ⚠ Error on row {idx} (Participant ID: {row.get('Participant ID', '?')}): {e}")
             stripped_transcripts.append(row["Transcript"])
             errors += 1
 

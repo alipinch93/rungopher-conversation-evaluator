@@ -214,7 +214,7 @@ def main():
     print("=" * 60)
 
     # Load summaries
-    df = pd.read_csv(args.input, dtype={"Call ID": str}, keep_default_na=False)
+    df = pd.read_csv(args.input, dtype={"Participant ID": str}, keep_default_na=False)
     summaries = df["Summary"].tolist()
     summaries = [s for s in summaries if s and "ERROR" not in s and "NO_TRANSCRIPT" not in s]
     print(f"Loaded {len(summaries)} valid summaries")

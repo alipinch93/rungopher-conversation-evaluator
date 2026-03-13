@@ -135,7 +135,7 @@ async def upload_csv(file: UploadFile = File(...), _=Depends(require_auth)):
 
     # Parse to validate and count rows
     try:
-        df = pd.read_csv(save_path, dtype={"Call ID": str}, keep_default_na=False)
+        df = pd.read_csv(save_path, dtype={"Participant ID": str}, keep_default_na=False)
     except Exception as e:
         save_path.unlink(missing_ok=True)
         raise HTTPException(400, f"Failed to parse CSV: {str(e)}")
@@ -224,11 +224,32 @@ async def _run_pipeline_async(
         summary_df.to_csv(summary_path, index=False)
 
         summary_only_path = SUMMARIES_DIR / f"{Path(filename).stem}_summaries_only.csv"
-        cols = ["Call ID", "Outcome", "Summary"]
+        cols = ["Participant ID", "Outcome", "Summary"]
         for c in ["Duration (Seconds)", "User Intent", "Direction"]:
             if c in summary_df.columns:
                 cols.append(c)
         summary_df[cols].to_csv(summary_only_path, index=False)
+
+        # Store per-conversation summaries for chat queries and report sampling
+        job["summaries"] = [
+            {
+                "id": str(row.get("Participant ID", f"row_{i}")),
+                "outcome": str(row.get("Outcome", "")),
+                "summary": str(row.get("Summary", "")).split("|", 1)[-1].strip()
+                    if "|" in str(row.get("Summary", "")) else str(row.get("Summary", "")),
+            }
+            for i, (_, row) in enumerate(summary_df.iterrows())
+            if str(row.get("Outcome", "")) not in ("ERROR", "NO_TRANSCRIPT")
+        ]
+
+        # Build 3-example samples per outcome for the report
+        outcome_samples: dict = {}
+        for s in job["summaries"]:
+            outcome = s["outcome"]
+            if outcome not in outcome_samples:
+                outcome_samples[outcome] = []
+            if len(outcome_samples[outcome]) < 3:
+                outcome_samples[outcome].append({"id": s["id"], "summary": s["summary"]})
 
         log_to_job(job_id, f"✓ All conversations summarized", "success")
         job["progress"] = 50
@@ -255,7 +276,7 @@ async def _run_pipeline_async(
         log_to_job(job_id, "Phase 4: Generating branded HTML report", "info")
 
         report_html = await asyncio.to_thread(
-            _phase4_report, cluster_data, job_id, model
+            _phase4_report, cluster_data, outcome_samples, job_id, model
         )
 
         timestamp = datetime.now().strftime("%Y-%m-%d_%H%M")
@@ -297,7 +318,7 @@ def _phase1_strip_pii(csv_path: str, job_id: str, threshold: float) -> tuple:
     from presidio_anonymizer import AnonymizerEngine
     from presidio_anonymizer.entities import OperatorConfig
 
-    df = pd.read_csv(csv_path, dtype={"Call ID": str}, keep_default_na=False)
+    df = pd.read_csv(csv_path, dtype={"Participant ID": str}, keep_default_na=False)
     df = df[df["Transcript"].str.strip().astype(bool)].copy()
     df.reset_index(drop=True, inplace=True)
 
@@ -541,7 +562,7 @@ Summaries:
     return merged
 
 
-def _phase4_report(cluster_data: dict, job_id: str, model: str) -> str:
+def _phase4_report(cluster_data: dict, outcome_samples: dict, job_id: str, model: str) -> str:
     """Phase 4: Generate branded HTML report via OpenAI."""
     from openai import OpenAI
     from scripts.utils.brand import BRAND
@@ -549,6 +570,7 @@ def _phase4_report(cluster_data: dict, job_id: str, model: str) -> str:
     client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
     colors = BRAND["colors"]
     typo = BRAND["typography"]
+    report_date = datetime.now().strftime("%B %d, %Y")
 
     prompt = f"""Generate a complete, standalone HTML report for a debt collection conversation evaluation.
 
@@ -564,20 +586,27 @@ BRAND GUIDELINES (MANDATORY):
 - Import Google Fonts Poppins and Recursive
 - 50% whitespace, border-radius:12px, subtle shadows
 
-REPORT STRUCTURE:
-1. Navy hero banner — "RunGopher" + "Conversation Evaluation Report" + date
-2. Executive summary (2-3 sentences)
-3. Outcome Distribution — CSS bar chart (cobalt=positive, coral=negative, sand=neutral)
-4. Cluster detail cards on sand background
-5. Top insights numbered list
-6. Compliance flags in coral-bordered cards
-7. Recommendations in cobalt-accented cards
-8. Footer: "Powered by RunGopher"
+REPORT DATE: {report_date} — use this exact date everywhere. Do NOT invent or guess a date.
 
+REPORT STRUCTURE:
+1. Navy hero banner — "RunGopher" + "Conversation Evaluation Report" + "{report_date}"
+2. Executive summary (3-4 sentences covering total volume, top outcomes, key patterns)
+3. Outcome Distribution — horizontal CSS bar chart using real counts/percentages from the data (cobalt=positive outcomes like PAYMENT_ARRANGED/CALLBACK_SCHEDULED, coral=negative like REFUSED/HUNG_UP/COMPLIANCE_ISSUE, sand=neutral)
+4. Cluster detail cards — one card per cluster with name, count, percentage, common patterns, and outliers
+5. Sample Conversations — for each outcome category that has samples, show 2-3 real conversation cards on sand background displaying the Participant ID and the one-sentence summary
+6. Top tactics numbered list with concrete detail
+7. Compliance flags in coral-bordered alert cards with specific details
+8. Recommendations in cobalt-accented cards with actionable steps
+9. Footer: "Powered by RunGopher"
+
+Be thorough — each section should be fully populated with the real data. Do not leave sections empty or generic.
 Output ONLY valid HTML. All CSS inline in <style>. No JavaScript. Self-contained.
 
 DATA:
-{json.dumps(cluster_data, indent=2)}"""
+{json.dumps(cluster_data, indent=2)}
+
+SAMPLE CONVERSATIONS (2-3 real examples per outcome — include these in section 5):
+{json.dumps(outcome_samples, indent=2)}"""
 
     log_to_job(job_id, "Applying RunGopher brand system...")
 
@@ -585,7 +614,7 @@ DATA:
         model=model,
         messages=[{"role": "user", "content": prompt}],
         temperature=0.4,
-        max_tokens=8000,
+        max_tokens=16000,
     )
 
     html = resp.choices[0].message.content.strip()
@@ -617,6 +646,12 @@ async def chat(job_id: str, body: dict, _=Depends(require_auth)):
 
     results = job["results"]
     cluster_data = results.get("cluster_data", {})
+    summaries = job.get("summaries", [])
+
+    summaries_text = "\n".join(
+        f"{s['id']}: [{s['outcome']}] {s['summary']}"
+        for s in summaries
+    ) if summaries else "(no individual conversation data available)"
 
     system_prompt = f"""You are an analyst assistant helping review a RunGopher debt collection voice agent evaluation report.
 Answer questions clearly and concisely based only on the data provided below.
@@ -638,6 +673,11 @@ COMPLIANCE FLAGS:
 RECOMMENDATIONS:
 {json.dumps(cluster_data.get('recommendations', []), indent=2)}
 
+INDIVIDUAL CONVERSATIONS ({len(summaries)} total):
+Each line: ParticipantID: [OUTCOME] one-sentence summary
+{summaries_text}
+
+When asked for examples or specific conversations, quote 3-5 relevant entries by Participant ID and summary.
 Be direct and specific. Use numbers and percentages from the data where relevant."""
 
     client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
