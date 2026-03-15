@@ -788,14 +788,24 @@ Be specific — use real numbers. Mention pick-up rate, resolution rate, and inb
     safe_date = report_date.replace(" ", "_")
 
     def stat_card(value, label, sub1, sub2="", accent_color="white"):
+        sub2_html = f"<div style='font-size:10px;opacity:0.45;margin-top:2px;'>{sub2}</div>" if sub2 else ""
+        poppins = "Poppins"
         return (
-            f"<div style='flex:1;min-width:160px;background:rgba(255,255,255,0.08);border-radius:12px;"
-            f"padding:20px 16px;text-align:center;'>"
-            f"<div style='font-size:36px;font-weight:600;font-family:\"Poppins\",sans-serif;color:{accent_color};line-height:1.1;'>{value}</div>"
-            f"<div style='font-size:13px;font-weight:600;font-family:\"Poppins\",sans-serif;margin-top:6px;'>{label}</div>"
+            f"<div style='flex:1;min-width:160px;background:rgba(255,255,255,0.08);border-radius:12px;padding:20px 16px;text-align:center;'>"
+            f"<div style='font-size:36px;font-weight:600;font-family:{poppins},sans-serif;color:{accent_color};line-height:1.1;'>{value}</div>"
+            f"<div style='font-size:13px;font-weight:600;font-family:{poppins},sans-serif;margin-top:6px;'>{label}</div>"
             f"<div style='font-size:11px;opacity:0.65;margin-top:3px;'>{sub1}</div>"
-            f"{'<div style=\"font-size:10px;opacity:0.45;margin-top:2px;\">' + sub2 + '</div>' if sub2 else ''}"
+            f"{sub2_html}"
             f"</div>"
+        )
+
+    def _direction_section(cards):
+        if not cards:
+            return ""
+        return (
+            "<div style='font-size:11px;opacity:0.5;text-transform:uppercase;letter-spacing:1px;"
+            "margin-bottom:14px;font-family:Poppins,sans-serif;'>By Direction</div>"
+            "<div style='display:flex;gap:16px;flex-wrap:wrap;'>" + cards + "</div>"
         )
 
     # Build direction sub-cards
@@ -836,7 +846,7 @@ Be specific — use real numbers. Mention pick-up rate, resolution rate, and inb
               f"{round((voicemail_count + no_answer_count) / total * 100, 1) if total else 0}% of total",
               "Voicemail + no-answer")}
         </div>
-        {f'<div style="font-size:11px;opacity:0.5;text-transform:uppercase;letter-spacing:1px;margin-bottom:14px;font-family:\'Poppins\',sans-serif;">By Direction</div><div style="display:flex;gap:16px;flex-wrap:wrap;">' + direction_cards + '</div>' if direction_cards else ''}
+        {_direction_section(direction_cards)}
       </div>
     </div>"""
 
