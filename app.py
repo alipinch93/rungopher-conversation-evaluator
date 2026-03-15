@@ -253,6 +253,28 @@ async def _run_pipeline_async(
             if len(outcome_samples[outcome]) < 3:
                 outcome_samples[outcome].append({"id": s["id"], "summary": s["summary"]})
 
+        # ── Pre-compute metrics from summary_df ────────────────────────
+        RESOLVED_OUTCOMES = {"PAYMENT_ARRANGED", "HARDSHIP_CLAIM"}
+        NOT_CONNECTED = {"VOICEMAIL", "NO_ANSWER", "ERROR", "NO_TRANSCRIPT"}
+
+        def calc_metrics(df_subset):
+            t = len(df_subset)
+            conn = len(df_subset[~df_subset["Outcome"].isin(NOT_CONNECTED)])
+            res = len(df_subset[df_subset["Outcome"].isin(RESOLVED_OUTCOMES)])
+            return {
+                "total": t,
+                "connected": conn,
+                "resolved": res,
+                "pickup_rate": round(conn / t * 100, 1) if t > 0 else 0.0,
+                "resolution_rate": round(res / conn * 100, 1) if conn > 0 else 0.0,
+            }
+
+        overall_metrics = calc_metrics(summary_df)
+        direction_metrics: dict = {}
+        if "Direction" in summary_df.columns:
+            for direction, group in summary_df.groupby("Direction"):
+                direction_metrics[str(direction).strip()] = calc_metrics(group)
+
         log_to_job(job_id, f"✓ All conversations summarized", "success")
         job["progress"] = 50
 
@@ -278,7 +300,8 @@ async def _run_pipeline_async(
         log_to_job(job_id, "Phase 4: Generating branded HTML report", "info")
 
         report_html = await asyncio.to_thread(
-            _phase4_report, cluster_data, outcome_samples, job_id, model, job_id
+            _phase4_report, cluster_data, outcome_samples, overall_metrics,
+            direction_metrics, job_id, model, job_id
         )
 
         timestamp = datetime.now().strftime("%Y-%m-%d_%H%M")
@@ -564,7 +587,8 @@ Summaries:
     return merged
 
 
-def _phase4_report(cluster_data: dict, outcome_samples: dict, job_id: str, model: str, report_job_id: str = "") -> str:
+def _phase4_report(cluster_data: dict, outcome_samples: dict, overall_metrics: dict,
+                   direction_metrics: dict, job_id: str, model: str, report_job_id: str = "") -> str:
     """Phase 4: Build HTML report programmatically; use LLM only for executive summary."""
     from openai import OpenAI
     from scripts.utils.brand import BRAND
@@ -577,29 +601,35 @@ def _phase4_report(cluster_data: dict, outcome_samples: dict, job_id: str, model
     clusters = cluster_data.get("clusters", [])
     total = cluster_data.get("total_conversations", 0)
 
-    # ── Resolution Rate ───────────────────────────────────────────────────
+    # ── Key metrics (pre-computed from summary_df) ────────────────────────
+    connected_calls = overall_metrics.get("connected", 0)
+    pickup_rate = overall_metrics.get("pickup_rate", 0.0)
+    resolved_calls = overall_metrics.get("resolved", 0)
+    resolution_rate = overall_metrics.get("resolution_rate", 0.0)
     cluster_by_name = {c["name"]: c["count"] for c in clusters}
     voicemail_count = cluster_by_name.get("VOICEMAIL", 0)
     no_answer_count = cluster_by_name.get("NO_ANSWER", 0)
-    connected_calls = total - voicemail_count - no_answer_count
-    resolved_calls = (cluster_by_name.get("PAYMENT_ARRANGED", 0)
-                      + cluster_by_name.get("TRANSFERRED", 0)
-                      + cluster_by_name.get("HARDSHIP_CLAIM", 0))
-    resolution_rate = round(resolved_calls / connected_calls * 100, 1) if connected_calls > 0 else 0.0
+    top_clusters = sorted(clusters, key=lambda c: -c["count"])[:3]
 
     # ── LLM: executive summary only ──────────────────────────────────────
     log_to_job(job_id, "Generating executive summary...")
     breakdown = [{"name": c["name"], "count": c["count"], "pct": c["percentage"]} for c in clusters]
+    direction_summary = ""
+    for d, m in direction_metrics.items():
+        direction_summary += f"\n- {d}: {m['total']:,} calls, {m['pickup_rate']}% pick-up, {m['resolution_rate']}% resolution"
+
     summary_prompt = f"""Write a 3-sentence executive summary for a debt collection voice agent evaluation.
 
 Data:
 - Total conversations: {total:,}
-- Connected calls (user picked up, excluding voicemail/no-answer): {connected_calls:,}
-- Resolution rate: {resolution_rate}% ({resolved_calls} resolved out of {connected_calls} connected calls)
-- Outcome breakdown: {json.dumps(breakdown)}
-- Compliance flags identified: {len(cluster_data.get('compliance_flags', []))}
+- Pick-up rate: {pickup_rate}% ({connected_calls:,} of {total:,} calls answered)
+- Resolution rate: {resolution_rate}% ({resolved_calls:,} resolved of {connected_calls:,} answered)
+  Resolution = payment agreed or hardship transfer only
+- By direction:{direction_summary if direction_summary else " no direction data"}
+- Top clusters: {json.dumps([{{"name": c["name"], "count": c["count"], "pct": c["percentage"]}} for c in top_clusters])}
+- Compliance flags: {len(cluster_data.get('compliance_flags', []))}
 
-Be specific — use real numbers. Always mention the resolution rate. No heading, just 3 sentences."""
+Be specific — use real numbers. Mention pick-up rate, resolution rate, and inbound vs outbound if available. No heading, just 3 sentences."""
 
     resp = client.chat.completions.create(
         model=model,
@@ -757,55 +787,56 @@ Be specific — use real numbers. Always mention the resolution rate. No heading
 
     safe_date = report_date.replace(" ", "_")
 
+    def stat_card(value, label, sub1, sub2="", accent_color="white"):
+        return (
+            f"<div style='flex:1;min-width:160px;background:rgba(255,255,255,0.08);border-radius:12px;"
+            f"padding:20px 16px;text-align:center;'>"
+            f"<div style='font-size:36px;font-weight:600;font-family:\"Poppins\",sans-serif;color:{accent_color};line-height:1.1;'>{value}</div>"
+            f"<div style='font-size:13px;font-weight:600;font-family:\"Poppins\",sans-serif;margin-top:6px;'>{label}</div>"
+            f"<div style='font-size:11px;opacity:0.65;margin-top:3px;'>{sub1}</div>"
+            f"{'<div style=\"font-size:10px;opacity:0.45;margin-top:2px;\">' + sub2 + '</div>' if sub2 else ''}"
+            f"</div>"
+        )
+
+    # Build direction sub-cards
+    direction_cards = ""
+    for d, m in direction_metrics.items():
+        direction_cards += stat_card(
+            f"{m['pickup_rate']}%",
+            f"{d} Pick-Up",
+            f"{m['connected']:,} of {m['total']:,} answered",
+            f"{m['resolution_rate']}% resolution rate",
+            colors["cobalt"],
+        )
+        direction_cards += stat_card(
+            f"{m['resolution_rate']}%",
+            f"{d} Resolution",
+            f"{m['resolved']:,} resolved of {m['connected']:,}",
+            "Payment / hardship only",
+            colors["cobalt"] if m["resolution_rate"] >= 10 else colors["coral"],
+        )
+
     resolution_card = f"""
-    <div style="background:{colors['navy']};color:white;padding:32px 24px;">
-      <div style="max-width:920px;margin:0 auto;display:flex;gap:24px;flex-wrap:wrap;">
-        <div style="flex:1;min-width:200px;background:rgba(255,255,255,0.08);border-radius:12px;
-                    padding:24px;text-align:center;">
-          <div style="font-size:42px;font-weight:600;font-family:'Poppins',sans-serif;
-                      color:{colors['cobalt'] if resolution_rate >= 10 else colors['coral']};">
-            {resolution_rate}%
-          </div>
-          <div style="font-size:15px;font-weight:600;font-family:'Poppins',sans-serif;margin-top:6px;">
-            Resolution Rate
-          </div>
-          <div style="font-size:12px;opacity:0.65;margin-top:4px;">
-            {resolved_calls:,} resolved / {connected_calls:,} connected calls
-          </div>
-          <div style="font-size:11px;opacity:0.5;margin-top:2px;">
-            Transferred + Payment Arranged
-          </div>
+    <div style="background:{colors['navy']};color:white;padding:28px 24px;">
+      <div style="max-width:960px;margin:0 auto;">
+        <div style="font-size:11px;opacity:0.5;text-transform:uppercase;letter-spacing:1px;margin-bottom:14px;font-family:'Poppins',sans-serif;">
+          Overall Performance
         </div>
-        <div style="flex:1;min-width:200px;background:rgba(255,255,255,0.08);border-radius:12px;
-                    padding:24px;text-align:center;">
-          <div style="font-size:42px;font-weight:600;font-family:'Poppins',sans-serif;">
-            {connected_calls:,}
-          </div>
-          <div style="font-size:15px;font-weight:600;font-family:'Poppins',sans-serif;margin-top:6px;">
-            Connected Calls
-          </div>
-          <div style="font-size:12px;opacity:0.65;margin-top:4px;">
-            of {total:,} total conversations
-          </div>
-          <div style="font-size:11px;opacity:0.5;margin-top:2px;">
-            Excludes voicemail &amp; no-answer
-          </div>
+        <div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:{'16px' if direction_cards else '0'};">
+          {stat_card(f"{pickup_rate}%", "Pick-Up Rate",
+              f"{connected_calls:,} of {total:,} answered",
+              "Excludes voicemail &amp; no-answer", colors["cobalt"])}
+          {stat_card(f"{resolution_rate}%", "Resolution Rate",
+              f"{resolved_calls:,} resolved of {connected_calls:,} answered",
+              "Payment agreed or hardship transfer only",
+              colors["cobalt"] if resolution_rate >= 10 else colors["coral"])}
+          {stat_card(f"{connected_calls:,}", "Connected Calls",
+              f"{pickup_rate}% pick-up rate", f"of {total:,} total")}
+          {stat_card(f"{voicemail_count + no_answer_count:,}", "Unreachable",
+              f"{round((voicemail_count + no_answer_count) / total * 100, 1) if total else 0}% of total",
+              "Voicemail + no-answer")}
         </div>
-        <div style="flex:1;min-width:200px;background:rgba(255,255,255,0.08);border-radius:12px;
-                    padding:24px;text-align:center;">
-          <div style="font-size:42px;font-weight:600;font-family:'Poppins',sans-serif;">
-            {voicemail_count + no_answer_count:,}
-          </div>
-          <div style="font-size:15px;font-weight:600;font-family:'Poppins',sans-serif;margin-top:6px;">
-            Unreachable
-          </div>
-          <div style="font-size:12px;opacity:0.65;margin-top:4px;">
-            {round((voicemail_count + no_answer_count) / total * 100, 1) if total else 0}% of total
-          </div>
-          <div style="font-size:11px;opacity:0.5;margin-top:2px;">
-            Voicemail + no-answer
-          </div>
-        </div>
+        {f'<div style="font-size:11px;opacity:0.5;text-transform:uppercase;letter-spacing:1px;margin-bottom:14px;font-family:\'Poppins\',sans-serif;">By Direction</div><div style="display:flex;gap:16px;flex-wrap:wrap;">' + direction_cards + '</div>' if direction_cards else ''}
       </div>
     </div>"""
 
@@ -828,7 +859,7 @@ Be specific — use real numbers. Always mention the resolution rate. No heading
       box-shadow:0 4px 16px rgba(50,89,254,0.35); display:inline-block;
     }}
     #pdf-btn:hover {{ opacity:0.9; }}
-    @media print {{ #pdf-btn {{ display:none; }} }}
+    @media print {{ #pdf-btn {{ display:none !important; }} }}
   </style>
 </head>
 <body>
@@ -1014,15 +1045,23 @@ async def download_report_pdf(job_id: str, _=Depends(require_auth)):
 
     pdf_name = report_path.stem + ".pdf"
     with tempfile.TemporaryDirectory() as tmpdir:
+        # Write a print-safe copy of the HTML with the fixed button hidden
+        html_src = report_path.read_text()
+        print_html = html_src.replace(
+            '<a id="pdf-btn"', '<a id="pdf-btn" style="display:none!important;"'
+        )
+        print_path = Path(tmpdir) / report_path.name
+        print_path.write_text(print_html)
+
         pdf_path = Path(tmpdir) / pdf_name
         result = subprocess.run(
             [
                 chrome,
-                "--headless", "--disable-gpu", "--no-sandbox",
+                "--headless=new", "--disable-gpu", "--no-sandbox",
+                "--run-all-compositor-stages-before-draw",
                 "--print-to-pdf=" + str(pdf_path),
                 "--no-pdf-header-footer",
-                "--print-to-pdf-no-header",
-                "file://" + str(report_path.resolve()),
+                "file://" + str(print_path.resolve()),
             ],
             capture_output=True, timeout=60,
         )
