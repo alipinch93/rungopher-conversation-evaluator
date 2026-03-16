@@ -573,16 +573,16 @@ Summaries:
     total = merged["total_conversations"] or 1
     for c in cluster_map.values():
         c["percentage"] = round(c["count"] / total * 100, 1)
-        c["common_patterns"] = list(set(c["common_patterns"]))[:5]
+        c["common_patterns"] = list({str(p) for p in c["common_patterns"] if p})[:5]
     merged["clusters"] = sorted(cluster_map.values(), key=lambda x: -x["count"])
 
     for batch in batch_results:
         merged["top_tactics"].extend(batch.get("top_tactics", []))
         merged["compliance_flags"].extend(batch.get("compliance_flags", []))
         merged["recommendations"].extend(batch.get("recommendations", []))
-    merged["top_tactics"] = list(set(merged["top_tactics"]))[:10]
-    merged["compliance_flags"] = list(set(merged["compliance_flags"]))[:10]
-    merged["recommendations"] = list(set(merged["recommendations"]))[:10]
+    merged["top_tactics"] = list({str(t) for t in merged["top_tactics"] if t})[:10]
+    merged["compliance_flags"] = list({str(f) for f in merged["compliance_flags"] if f})[:10]
+    merged["recommendations"] = list({str(r) for r in merged["recommendations"] if r})[:10]
 
     return merged
 
