@@ -326,9 +326,12 @@ async def _run_pipeline_async(
         log_to_job(job_id, "✓ Pipeline complete — all 4 phases finished", "success")
 
     except Exception as e:
+        import traceback
         job["status"] = "error"
         job["error"] = str(e)
+        tb = traceback.format_exc()
         log_to_job(job_id, f"✗ Pipeline failed: {str(e)}", "error")
+        log_to_job(job_id, tb, "error")
 
 
 # ─── Phase Implementations ─────────────────────────────────────────────
@@ -639,6 +642,11 @@ def _phase4_report(cluster_data: dict, outcome_samples: dict, overall_metrics: d
     for d, m in direction_metrics.items():
         direction_summary += f"\n- {d}: {m['total']:,} calls, {m['pickup_rate']}% pick-up, {m['resolution_rate']}% resolution"
 
+    top_clusters_json = json.dumps([
+        {"name": c["name"], "count": c["count"], "pct": c["percentage"]}
+        for c in top_clusters
+    ])
+
     summary_prompt = f"""Write a 3-sentence executive summary for a debt collection voice agent evaluation.
 
 Data:
@@ -647,7 +655,7 @@ Data:
 - Resolution rate: {resolution_rate}% ({resolved_calls:,} resolved of {connected_calls:,} answered)
   Resolution = payment agreed or hardship transfer only
 - By direction:{direction_summary if direction_summary else " no direction data"}
-- Top clusters: {json.dumps([{{"name": c["name"], "count": c["count"], "pct": c["percentage"]}} for c in top_clusters])}
+- Top clusters: {top_clusters_json}
 - Compliance flags: {len(cluster_data.get('compliance_flags', []))}
 
 Be specific — use real numbers. Mention pick-up rate, resolution rate, and inbound vs outbound if available. No heading, just 3 sentences."""
