@@ -902,7 +902,7 @@ Be specific — use real numbers. Mention pick-up rate, resolution rate, and inb
   </style>
 </head>
 <body>
-  <a id="pdf-btn" href="/api/jobs/{report_job_id}/report/pdf">&#8595; Download PDF</a>
+  <a id="pdf-btn" href="http://localhost:8000/api/jobs/{report_job_id}/report/pdf">&#8595; Download PDF</a>
 
   <div id="report-content">
     <div style="background:{colors['navy']};color:white;padding:56px 24px 32px;text-align:center;">
