@@ -815,6 +815,7 @@ Be specific — use real numbers. Mention pick-up rate, resolution rate, and inb
     )
 
     safe_date = report_date.replace(" ", "_")
+    safe_filename = f"evaluation_report_{datetime.now().strftime('%Y-%m-%d_%H%M')}.html"
 
     def stat_card(value, label, sub1, sub2="", accent_color="white"):
         sub2_html = f"<div style='font-size:10px;opacity:0.45;margin-top:2px;'>{sub2}</div>" if sub2 else ""
@@ -902,7 +903,7 @@ Be specific — use real numbers. Mention pick-up rate, resolution rate, and inb
   </style>
 </head>
 <body>
-  <a id="pdf-btn" href="http://localhost:8000/api/jobs/{report_job_id}/report/pdf">&#8595; Download PDF</a>
+  <a id="pdf-btn" href="http://localhost:8000/api/report-pdf/{safe_filename}">&#8595; Download PDF</a>
 
   <div id="report-content">
     <div style="background:{colors['navy']};color:white;padding:56px 24px 32px;text-align:center;">
@@ -1062,19 +1063,16 @@ async def download_report(job_id: str, _=Depends(require_auth)):
     return FileResponse(report_path, media_type="text/html", filename=report_path.name)
 
 
-@app.get("/api/jobs/{job_id}/report/pdf")
-async def download_report_pdf(job_id: str, _=Depends(require_auth)):
-    """Render the HTML report to PDF using Chrome headless and stream it back."""
+@app.get("/api/report-pdf/{filename}")
+async def download_report_pdf(filename: str, _=Depends(require_auth)):
+    """Render an HTML report to PDF using Chrome headless. Looks up by filename — no in-memory job needed."""
     import subprocess, tempfile
 
-    if job_id not in jobs:
-        raise HTTPException(404, "Job not found")
+    # Safety: only allow filenames from the reports directory
+    if not filename.endswith(".html") or "/" in filename or ".." in filename:
+        raise HTTPException(400, "Invalid filename")
 
-    job = jobs[job_id]
-    if job["status"] != "completed" or not job.get("results", {}).get("report_file"):
-        raise HTTPException(400, "Report not ready yet")
-
-    report_path = REPORTS_DIR / job["results"]["report_file"]
+    report_path = REPORTS_DIR / filename
     if not report_path.exists():
         raise HTTPException(404, "Report file not found")
 
