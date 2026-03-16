@@ -545,6 +545,27 @@ Summaries:
                     log_to_job(job_id, f"⚠ Batch {i + 1} error: {err}", "warn")
                     break
 
+    def _sanitize_batch(b: dict) -> dict:
+        """Ensure all LLM-returned values are safe scalar types."""
+        clean_clusters = []
+        for c in b.get("clusters", []):
+            clean_clusters.append({
+                "name": str(c.get("name", "Unknown")),
+                "count": int(c.get("count", 0)),
+                "percentage": float(c.get("percentage", 0.0)),
+                "common_patterns": [str(p) for p in c.get("common_patterns", []) if p],
+                "outliers": [str(o) for o in c.get("outliers", []) if o],
+            })
+        return {
+            "total_conversations": int(b.get("total_conversations", 0)),
+            "clusters": clean_clusters,
+            "top_tactics": [str(t) for t in b.get("top_tactics", []) if t],
+            "compliance_flags": [str(f) for f in b.get("compliance_flags", []) if f],
+            "recommendations": [str(r) for r in b.get("recommendations", []) if r],
+        }
+
+    batch_results = [_sanitize_batch(b) for b in batch_results]
+
     # Merge
     if not batch_results:
         return {"total_conversations": 0, "clusters": [], "top_tactics": [], "compliance_flags": [], "recommendations": []}
